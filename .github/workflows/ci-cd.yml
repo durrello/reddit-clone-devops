@@ -15,8 +15,9 @@ on:
       - "k8s/**"
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: reddit-clone-dev
+  ECR_REGISTRY: 185542457060.dkr.ecr.us-east-1.amazonaws.com
 
 jobs:
   # ─── Job 1: Test ─────────────────────────────────────────────────────────────
@@ -68,39 +69,30 @@ jobs:
     needs: [test, security-scan]
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./app
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: Build, tag, and push image to ECR
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} -t $ECR_REGISTRY/$ECR_REPOSITORY:latest ./app
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
       - name: Scan Docker image with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
           format: "table"
           severity: "CRITICAL,HIGH"
           exit-code: "0"
@@ -120,6 +112,7 @@ jobs:
 
       - name: Configure kubectl
         run: |
+          mkdir -p $HOME/.kube
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
 
       - name: Deploy to Dev namespace
@@ -129,7 +122,7 @@ jobs:
           kubectl apply -f k8s/base/deployment.yaml -n reddit-clone-dev
           kubectl apply -f k8s/base/service.yaml -n reddit-clone-dev
           kubectl set image deployment/reddit-clone \
-            reddit-clone=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev \
+            reddit-clone=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
             -n reddit-clone-dev
           kubectl rollout status deployment/reddit-clone -n reddit-clone-dev --timeout=120s
 
@@ -148,6 +141,7 @@ jobs:
 
       - name: Configure kubectl
         run: |
+          mkdir -p $HOME/.kube
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
 
       - name: Deploy to Production namespace
@@ -158,6 +152,6 @@ jobs:
           kubectl apply -f k8s/base/service.yaml -n reddit-clone-prod
           kubectl apply -f k8s/base/ingress.yaml -n reddit-clone-prod
           kubectl set image deployment/reddit-clone \
-            reddit-clone=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            reddit-clone=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
             -n reddit-clone-prod
           kubectl rollout status deployment/reddit-clone -n reddit-clone-prod --timeout=120s

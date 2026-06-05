@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: reddit-clone
-          image: ghcr.io/durrello/reddit-clone:latest
+          image: 185542457060.dkr.ecr.us-east-1.amazonaws.com/reddit-clone-dev:latest
           ports:
             - containerPort: 3000
           envFrom:
