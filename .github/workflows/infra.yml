@@ -1,0 +1,137 @@
+name: Infrastructure Pipeline (Terraform)
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "terraform/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+
+env:
+  TF_VERSION: "1.5.7"
+  AWS_REGION: "us-east-1"
+
+jobs:
+  # ─── Terraform Validate & Plan ─────────────────────────────────────────────
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan (Dev)
+        if: github.ref == 'refs/heads/dev'
+        run: terraform plan -var-file=terraform.tfvars.dev -out=tfplan-dev
+        
+      - name: Terraform Plan (Prod)
+        if: github.ref == 'refs/heads/main'
+        run: terraform plan -var-file=terraform.tfvars.prod -out=tfplan-prod
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform/tfplan-*
+
+  # ─── Security Scan (tfsec) ────────────────────────────────────────────────
+  terraform-security:
+    name: Terraform Security Scan
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: ./terraform
+          soft_fail: true
+
+  # ─── Apply to Dev (auto) ───────────────────────────────────────────────────
+  terraform-apply-dev:
+    name: Terraform Apply (Dev)
+    runs-on: ubuntu-latest
+    needs: [terraform-plan, terraform-security]
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    environment: infrastructure-dev
+    defaults:
+      run:
+        working-directory: ./terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply (Dev)
+        run: terraform apply -var-file=terraform.tfvars.dev -auto-approve
+
+  # ─── Apply to Prod (manual approval) ──────────────────────────────────────
+  terraform-apply-prod:
+    name: Terraform Apply (Prod)
+    runs-on: ubuntu-latest
+    needs: [terraform-plan, terraform-security]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: infrastructure-prod  # Requires manual approval
+    defaults:
+      run:
+        working-directory: ./terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply (Prod)
+        run: terraform apply -var-file=terraform.tfvars.prod -auto-approve

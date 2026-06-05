@@ -1,0 +1,313 @@
+# ─── GitLab CI/CD Pipeline ────────────────────────────────────────────────────
+# Dual pipeline: Application + Infrastructure
+# App pipeline triggers on app/ or k8s/ changes
+# Infra pipeline triggers on terraform/ changes
+# ─────────────────────────────────────────────────────────────────────────────
+
+stages:
+  - test
+  - security
+  - build
+  - deploy-dev
+  - deploy-prod
+  - infra-plan
+  - infra-apply-dev
+  - infra-apply-prod
+
+variables:
+  DOCKER_IMAGE: $CI_REGISTRY_IMAGE
+  DOCKER_TAG: $CI_COMMIT_SHORT_SHA
+  KUBERNETES_NAMESPACE_DEV: reddit-clone-dev
+  KUBERNETES_NAMESPACE_PROD: reddit-clone-prod
+  TF_VERSION: "1.5.7"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# APPLICATION PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Stage: Test ─────────────────────────────────────────────────────────────
+lint:
+  stage: test
+  image: node:18-alpine
+  before_script:
+    - cd app
+    - npm ci
+  script:
+    - npm run lint
+  rules:
+    - changes:
+        - app/**
+        - k8s/**
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-app
+    paths:
+      - app/node_modules/
+
+unit-tests:
+  stage: test
+  image: node:18-alpine
+  before_script:
+    - cd app
+    - npm ci
+  script:
+    - npm test
+  rules:
+    - changes:
+        - app/**
+        - k8s/**
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-app
+    paths:
+      - app/node_modules/
+  artifacts:
+    reports:
+      junit: app/junit.xml
+    when: always
+
+# ─── Stage: Security ────────────────────────────────────────────────────────
+trivy-fs-scan:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy fs --severity CRITICAL,HIGH --exit-code 0 --format table ./app
+  rules:
+    - changes:
+        - app/**
+  needs:
+    - lint
+    - unit-tests
+
+dependency-scan:
+  stage: security
+  image: node:18-alpine
+  before_script:
+    - cd app
+    - npm ci
+  script:
+    - npm audit --audit-level=high || true
+  rules:
+    - changes:
+        - app/**
+  needs:
+    - lint
+    - unit-tests
+  allow_failure: true
+
+# ─── Stage: Build & Push ────────────────────────────────────────────────────
+build-image:
+  stage: build
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker build -t $DOCKER_IMAGE:$DOCKER_TAG -t $DOCKER_IMAGE:latest ./app
+    - docker push $DOCKER_IMAGE:$DOCKER_TAG
+    - docker push $DOCKER_IMAGE:latest
+  rules:
+    - changes:
+        - app/**
+  needs:
+    - trivy-fs-scan
+
+trivy-image-scan:
+  stage: build
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy image --severity CRITICAL,HIGH --exit-code 0 --format table $DOCKER_IMAGE:$DOCKER_TAG
+  rules:
+    - changes:
+        - app/**
+  needs:
+    - build-image
+  allow_failure: true
+
+# ─── Stage: Deploy App to Dev ────────────────────────────────────────────────
+deploy-app-dev:
+  stage: deploy-dev
+  image: bitnami/kubectl:latest
+  environment:
+    name: development
+    url: https://dev.reddit-clone.example.com
+  before_script:
+    - echo "$KUBE_CONFIG" | base64 -d > /tmp/kubeconfig
+    - export KUBECONFIG=/tmp/kubeconfig
+  script:
+    - kubectl apply -f k8s/base/namespace.yaml
+    - kubectl apply -f k8s/dev/ -n $KUBERNETES_NAMESPACE_DEV
+    - kubectl apply -f k8s/base/deployment.yaml -n $KUBERNETES_NAMESPACE_DEV
+    - kubectl apply -f k8s/base/service.yaml -n $KUBERNETES_NAMESPACE_DEV
+    - kubectl set image deployment/reddit-clone reddit-clone=$DOCKER_IMAGE:$DOCKER_TAG -n $KUBERNETES_NAMESPACE_DEV
+    - kubectl rollout status deployment/reddit-clone -n $KUBERNETES_NAMESPACE_DEV --timeout=120s
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+      changes:
+        - app/**
+        - k8s/**
+  needs:
+    - build-image
+
+# ─── Stage: Deploy App to Prod (Manual) ─────────────────────────────────────
+deploy-app-prod:
+  stage: deploy-prod
+  image: bitnami/kubectl:latest
+  environment:
+    name: production
+    url: https://reddit-clone.example.com
+  before_script:
+    - echo "$KUBE_CONFIG" | base64 -d > /tmp/kubeconfig
+    - export KUBECONFIG=/tmp/kubeconfig
+  script:
+    - kubectl apply -f k8s/base/namespace.yaml
+    - kubectl apply -f k8s/prod/ -n $KUBERNETES_NAMESPACE_PROD
+    - kubectl apply -f k8s/base/deployment.yaml -n $KUBERNETES_NAMESPACE_PROD
+    - kubectl apply -f k8s/base/service.yaml -n $KUBERNETES_NAMESPACE_PROD
+    - kubectl apply -f k8s/base/ingress.yaml -n $KUBERNETES_NAMESPACE_PROD
+    - kubectl set image deployment/reddit-clone reddit-clone=$DOCKER_IMAGE:$DOCKER_TAG -n $KUBERNETES_NAMESPACE_PROD
+    - kubectl rollout status deployment/reddit-clone -n $KUBERNETES_NAMESPACE_PROD --timeout=120s
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - app/**
+        - k8s/**
+  needs:
+    - build-image
+  when: manual
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INFRASTRUCTURE PIPELINE (Terraform)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Terraform Format & Validate ─────────────────────────────────────────────
+terraform-validate:
+  stage: test
+  image:
+    name: hashicorp/terraform:$TF_VERSION
+    entrypoint: [""]
+  before_script:
+    - cd terraform
+    - terraform init -backend=false
+  script:
+    - terraform fmt -check -recursive
+    - terraform validate
+  rules:
+    - changes:
+        - terraform/**
+
+# ─── Terraform Security Scan ─────────────────────────────────────────────────
+terraform-security:
+  stage: security
+  image:
+    name: aquasec/tfsec:latest
+    entrypoint: [""]
+  script:
+    - tfsec ./terraform --soft-fail
+  rules:
+    - changes:
+        - terraform/**
+  needs:
+    - terraform-validate
+  allow_failure: true
+
+# ─── Terraform Plan ──────────────────────────────────────────────────────────
+terraform-plan-dev:
+  stage: infra-plan
+  image:
+    name: hashicorp/terraform:$TF_VERSION
+    entrypoint: [""]
+  before_script:
+    - cd terraform
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_DEFAULT_REGION=$AWS_REGION
+    - terraform init
+  script:
+    - terraform plan -var-file=terraform.tfvars.dev -out=tfplan-dev
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+      changes:
+        - terraform/**
+  needs:
+    - terraform-security
+  artifacts:
+    paths:
+      - terraform/tfplan-dev
+    expire_in: 1 hour
+
+terraform-plan-prod:
+  stage: infra-plan
+  image:
+    name: hashicorp/terraform:$TF_VERSION
+    entrypoint: [""]
+  before_script:
+    - cd terraform
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_DEFAULT_REGION=$AWS_REGION
+    - terraform init
+  script:
+    - terraform plan -var-file=terraform.tfvars.prod -out=tfplan-prod
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - terraform/**
+  needs:
+    - terraform-security
+  artifacts:
+    paths:
+      - terraform/tfplan-prod
+    expire_in: 1 hour
+
+# ─── Terraform Apply Dev (auto) ─────────────────────────────────────────────
+terraform-apply-dev:
+  stage: infra-apply-dev
+  image:
+    name: hashicorp/terraform:$TF_VERSION
+    entrypoint: [""]
+  environment:
+    name: infrastructure-dev
+  before_script:
+    - cd terraform
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_DEFAULT_REGION=$AWS_REGION
+    - terraform init
+  script:
+    - terraform apply -var-file=terraform.tfvars.dev -auto-approve
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+      changes:
+        - terraform/**
+  needs:
+    - terraform-plan-dev
+
+# ─── Terraform Apply Prod (manual approval) ─────────────────────────────────
+terraform-apply-prod:
+  stage: infra-apply-prod
+  image:
+    name: hashicorp/terraform:$TF_VERSION
+    entrypoint: [""]
+  environment:
+    name: infrastructure-prod
+  before_script:
+    - cd terraform
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_DEFAULT_REGION=$AWS_REGION
+    - terraform init
+  script:
+    - terraform apply -var-file=terraform.tfvars.prod -auto-approve
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      changes:
+        - terraform/**
+  needs:
+    - terraform-plan-prod
+  when: manual

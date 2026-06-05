@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Environment files (secrets)
+envs/.env.dev
+envs/.env.prod
+.env
+.env.local
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# Monitoring data
+monitoring/prometheus_data/
+monitoring/grafana_data/
+
+# Docker
+*.log

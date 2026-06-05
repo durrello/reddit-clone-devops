@@ -1,0 +1,42 @@
+groups:
+  - name: reddit-clone-alerts
+    rules:
+      # Alert: Application is down
+      - alert: AppDown
+        expr: up{job="reddit-clone"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Reddit Clone application is down"
+          description: "The application has been unreachable for more than 1 minute."
+
+      # Alert: High CPU usage
+      - alert: HighCPUUsage
+        expr: rate(container_cpu_usage_seconds_total{name="reddit-clone"}[5m]) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage detected"
+          description: "Container CPU usage is above 80% for 5 minutes."
+
+      # Alert: High memory usage
+      - alert: HighMemoryUsage
+        expr: container_memory_usage_bytes{name="reddit-clone"} / container_spec_memory_limit_bytes{name="reddit-clone"} > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage detected"
+          description: "Container memory usage is above 85%."
+
+      # Alert: High response time
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="reddit-clone"}[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High response time"
+          description: "95th percentile response time is above 2 seconds."
