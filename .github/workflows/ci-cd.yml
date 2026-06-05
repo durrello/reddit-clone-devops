@@ -100,9 +100,10 @@ jobs:
       - name: Scan Docker image with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
           format: "table"
           severity: "CRITICAL,HIGH"
+          exit-code: "0"
 
   # ─── Job 4: Deploy to Dev ──────────────────────────────────────────────────
   deploy-dev:
@@ -128,7 +129,7 @@ jobs:
           kubectl apply -f k8s/base/deployment.yaml -n reddit-clone-dev
           kubectl apply -f k8s/base/service.yaml -n reddit-clone-dev
           kubectl set image deployment/reddit-clone \
-            reddit-clone=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            reddit-clone=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev \
             -n reddit-clone-dev
           kubectl rollout status deployment/reddit-clone -n reddit-clone-dev --timeout=120s
 
