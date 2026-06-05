@@ -160,3 +160,4 @@ jobs:
             reddit-clone=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
             -n reddit-clone-prod
           kubectl rollout status deployment/reddit-clone -n reddit-clone-prod --timeout=120s
+trigger ci
